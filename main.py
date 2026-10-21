@@ -13,6 +13,7 @@ except ImportError:
 import dnsfix          # UDP DNS fallback (Pico 2 W: built-in getaddrinfo -> OSError -2)
 import ddns_softether as d
 import netif
+import keyxfer      # DDNS key export / import (device replacement)
 try:
     import config
 except ImportError:
@@ -414,8 +415,8 @@ def html(s):
             '<p style="font-size:90%">3〜31 文字。英数字と - のみ（先頭・末尾に - は不可）。'
             '変更後は <i>新しい名前</i>.softether.net になります。</p>')
     return (PAGE_HEAD + '<h1>SoftEther DDNS 状態</h1><table>%s</table>%s'
-            '<p>30 秒ごとに自動更新（入力中は止まります） / <a href="/status.json">status.json</a>'
-            ' / <a href="/init">初期化（DDNS Key の削除）</a></p>'
+            '<p>30 秒ごとに自動更新（入力中は止まります）'
+            ' / <a href="/init">初期化・機器入れ替え（DDNS Key）</a></p>'
             '<script>setInterval(function(){var i=document.getElementById("h");'
             'if(document.activeElement!==i&&!i.value)location.reload();},30000);</script>'
             '</body></html>') % (body, form)
@@ -498,7 +499,7 @@ async def change_hostname_web(name):
     return False, "%s：%s" % (esc(name), msg)
 
 
-# ---------------- init page (GET /init, POST /reset): delete the DDNS key ----------------
+# ---------------- init page (GET /init; POST /reset, /export, /import): DDNS key ----------------
 def init_info():
     i = net.info() if net else {}
     hn = None
@@ -521,27 +522,42 @@ def init_html(m):
         ("起動回数 / 前回の再起動理由", "%s 回目 / %s" % (esc(m["boots"]), esc(m["reset_reason"]))),
     ]
     body = "".join("<tr><th>%s</th><td>%s</td></tr>" % r for r in rows)
-    return (PAGE_HEAD + '<h1>初期化（DDNS Key の削除）</h1>'
-            '<p>本機を別のお客様に渡す・ホスト名を完全に作り直す、といった場合に使います。'
+    return (PAGE_HEAD + '<h1>初期化・機器入れ替え（DDNS Key）</h1>'
+            '<p>機器の入れ替え（Key の書き出し・読み込み）や、<br>ホスト名を完全に作り直す（Key の削除）ときに使います。<br>'
             '通常の運用では使う必要はありません。</p>'
-            '<table>%s</table>'
-            '<p style="color:red"><b>注意:</b> ddns_key.txt を削除すると、今のホスト名（%s）は'
-            '<b>二度と取り戻せません</b>。再起動後に新しい Key と新しいホスト名（vpnNNNNNNNN）が割り当てられます。'
-            '必要なら先に USB で ddns_key.txt をバックアップしてください（mpremote cp :ddns_key.txt .）。</p>'
-            '<form method="post" action="/reset" onsubmit="return confirm(\'DDNS Key とホスト名の設定を削除します。'
-            '元に戻せません。よろしいですか？\')">'
-            '確認のため <b>DELETE</b> と入力: <input name="confirm" autocomplete="off" required> '
-            '<button type="submit" style="color:#fff;background:#c00">Key を削除する</button></form>'
-            '<p><a href="/">状態ページに戻る</a></p></body></html>') % (body, esc(m["hostname"]) if m["hostname"] else "不明")
+            '<table>%s</table>%s'
+            '<p><a href="/">状態ページに戻る</a></p></body></html>') % (
+                body, keyxfer.forms_html(m["key_present"], esc(m["hostname"]) if m["hostname"] else None))
 
-def init_result(ok, msg):
-    return (PAGE_HEAD + '<h1>初期化</h1><p style="color:%s;font-weight:bold">%s</p></body></html>'
-            % ("green" if ok else "red", msg))
+# After a reboot-triggering action: poll /status.json until the boot counter changes
+# (= the device has rebooted and the Web UI is back), then jump to the top page.
+_BACK_JS = ('<p id="rb">再起動を待っています…（応答が戻ったら自動でトップページへ戻ります）</p>'
+            '<p><a href="/">トップページへ戻る</a></p>'
+            '<script>(function(){var old=%s,t0=Date.now(),e=document.getElementById("rb");'
+            'function go(){location.href="/";}'
+            'function poll(){var s=Math.round((Date.now()-t0)/1000);'
+            'if(s>120){e.textContent="自動で戻れませんでした。IP アドレスが変わった可能性があります。下のリンクか、新しい IP で開き直してください。";return;}'
+            'e.textContent="再起動を待っています… "+s+" 秒（応答が戻ったら自動でトップページへ戻ります）";'
+            'var x=new XMLHttpRequest();x.open("GET","/status.json?_="+Date.now());x.timeout=3000;'
+            'x.onload=function(){try{var j=JSON.parse(x.responseText);if(x.status==200&&j.boots!=old){go();return;}}catch(_){}'
+            'setTimeout(poll,2000);};'
+            'x.onerror=x.ontimeout=function(){setTimeout(poll,2000);};x.send();}'
+            'setTimeout(poll,7000);})();</script>')
+
+def init_result(ok, msg, reboot=False):
+    js = ""
+    if reboot:
+        b = st["boot"].get("boots")
+        js = _BACK_JS % (json.dumps(b) if b is not None else "null")
+    return (PAGE_HEAD + '<h1>初期化・機器入れ替え</h1><p style="color:%s;font-weight:bold">%s</p>%s</body></html>'
+            % ("green" if ok else "red", msg, js))
+
+result_html = init_result
 
 def init_reset(form):
-    """POST /reset. Returns (ok, message, reboot)."""
-    if form.get("confirm", "").strip() != "DELETE":
-        return False, '確認の文字列が違います（大文字で DELETE と入力してください）。何も削除していません。<br><a href="/init">戻る</a>', False
+    """POST /reset (confirm=1). Returns (ok, message, reboot)."""
+    if not keyxfer.confirmed(form):
+        return False, keyxfer.CONFIRM_MSG + '<br><a href="/init">戻る</a>', False
     if lock.locked():
         return False, 'DDNS の登録処理中です。少し待ってからやり直してください。何も削除していません。<br><a href="/init">戻る</a>', False
     st["resetting"] = True               # DDNS タスクを止める（削除した Key を作り直さないように）
@@ -556,22 +572,67 @@ def init_reset(form):
     print("init: deleted", done, "errors", errs)
     if errs:
         return False, "削除に失敗しました: %s。5 秒後に再起動します。" % esc(", ".join(errs)), True
-    return True, ("削除しました: %s。5 秒後に再起動し、新しい Key で新しいホスト名を登録します。"
+    return True, ("削除しました: %s。5 秒後に再起動し、新しい Key で新しいホスト名を登録します。<br>"
                   "新しいホスト名は再起動後の状態ページで確認してください。" % (esc(", ".join(done)) or "（削除対象なし）")), True
+
+def init_export(form):
+    """POST /export (confirm=1) -> route tuple: ddns_key.txt download (40 uppercase hex chars)."""
+    if not keyxfer.confirmed(form):
+        return "200 OK", "text/html; charset=utf-8", init_result(False, keyxfer.CONFIRM_MSG + '<br><a href="/init">戻る</a>')
+    k = keyxfer.read_key(KEY_FILE)
+    if not k:
+        return "200 OK", "text/html; charset=utf-8", init_result(False, 'Key（ddns_key.txt）がありません。<br><a href="/init">戻る</a>')
+    print("init: key exported")             # never log the key itself
+    return ("200 OK", "text/plain; charset=us-ascii", k,
+            'Content-Disposition: attachment; filename="ddns_key.txt"\r\nX-Content-Type-Options: nosniff\r\n')
+
+def init_import(body, ctype):
+    """POST /import (multipart file "keyfile", confirm=1). Returns (ok, message, reboot)."""
+    bd = keyxfer.ctype_boundary(ctype)
+    form = keyxfer.parse_multipart(body, bd) if bd else parse_form(body)
+    back = '<br><a href="/init">戻る</a>'
+    if not keyxfer.confirmed(form):
+        return False, keyxfer.CONFIRM_MSG + back, False
+    if lock.locked():
+        return False, "DDNS の登録処理中です。少し待ってからやり直してください。何も変更していません。" + back, False
+    k, err = keyxfer.import_key_from(form)
+    if not k:
+        return False, "読み込めませんでした: %s 何も変更していません。" % err + back, False
+    st["resetting"] = True               # DDNS タスクを止める（古い Key で登録しないように）
+    try:
+        keyxfer.write_key_atomic(KEY_FILE, k)
+    except OSError as e:
+        print("init: key import failed", e)
+        return False, "Key の保存に失敗しました（%s）。5 秒後に再起動します。" % esc(e), True
+    try:
+        os.remove(HOSTNAME_FILE)            # keep the hostname the server has for this key
+    except OSError:
+        pass
+    print("init: key imported, hostname file removed")
+    return True, ("Key を読み込みました。5 秒後に再起動し、この Key に結びついたホスト名で登録を続けます。"
+                  "<br><b>古い機器は電源を切ったままにしてください。</b>"
+                  "再起動後の状態ページでホスト名を確認してください。"), True
 
 async def reboot_later(reason, delay=5):
     await asyncio.sleep(delay)
     hard_reset(reason)
 
 # ---------------- web server ----------------
-async def route(method, path, body):
-    """Returns (code, content-type, body)."""
+async def route(method, path, body, ctype=b""):
+    """Returns (code, content-type, body[, extra headers])."""
     html_t = "text/html; charset=utf-8"
     if method == "POST" and path == "/reset":
         ok, msg, reboot = init_reset(parse_form(body))
         if reboot:
             asyncio.create_task(reboot_later("Web の初期化ページで Key を削除"))
-        return "200 OK", html_t, init_result(ok, msg)
+        return "200 OK", html_t, init_result(ok, msg, reboot)
+    if method == "POST" and path == "/export":
+        return init_export(parse_form(body))
+    if method == "POST" and path == "/import":
+        ok, msg, reboot = init_import(body, ctype)
+        if reboot:
+            asyncio.create_task(reboot_later("Web の初期化ページで Key を読み込み"))
+        return "200 OK", html_t, init_result(ok, msg, reboot)
     if method == "GET" and path == "/init":
         return "200 OK", html_t, init_html(init_info())
     if method == "POST" and path == "/hostname":
@@ -587,23 +648,42 @@ async def handle(reader, writer):
     try:
         line = await reader.readline()
         clen = 0
+        ctype = b""
         for _ in range(50):
             h = await reader.readline()
             if not h or h == b"\r\n":
                 break
-            if h.lower().startswith(b"content-length:"):
+            hl = h.lower()
+            if hl.startswith(b"content-length:"):
                 try:
                     clen = int(h.split(b":", 1)[1].strip().decode())
                 except ValueError:
                     clen = 0
+            elif hl.startswith(b"content-type:"):
+                ctype = h.split(b":", 1)[1].strip()
         parts = line.split()
         method = parts[0].decode() if parts else "GET"
         path = parts[1].decode().split("?")[0] if len(parts) > 1 else "/"
-        body = await reader.readexactly(clen) if method == "POST" and 0 < clen <= 512 else b""
-        code, ctype, body = await route(method, path, body)
+        body = b""
+        if method == "POST" and clen > keyxfer.MAX_BODY:
+            left = min(clen, 16384)              # drain a little so the browser sees the reply
+            while left > 0:
+                c = await reader.read(min(512, left))
+                if not c:
+                    break
+                left -= len(c)
+            r = ("413 Payload Too Large", "text/html; charset=utf-8",
+                 result_html(False, "送信データが大きすぎます（最大 %d バイト）。ddns_key.txt を選んでください。"
+                             % keyxfer.MAX_BODY))
+        else:
+            if method == "POST" and clen > 0:
+                body = await reader.readexactly(clen)
+            r = await route(method, path, body, ctype)
+        code, rtype, body = r[0], r[1], r[2]
+        extra = r[3] if len(r) > 3 else ""
         b = body.encode()
-        writer.write(("HTTP/1.0 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
-                      "Cache-Control: no-cache\r\nConnection: close\r\n\r\n" % (code, ctype, len(b))).encode())
+        writer.write(("HTTP/1.0 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n%s"
+                      "Cache-Control: no-store\r\nConnection: close\r\n\r\n" % (code, rtype, len(b), extra)).encode())
         writer.write(b)
         await writer.drain()
     except Exception as e:
