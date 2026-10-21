@@ -51,7 +51,6 @@ MicroPython で再現したものです。Raspberry Pi **Pico 2 W** の **Wi-Fi*
 mpremote cp main.py netif.py ddns_softether.py dnsfix.py config.py secrets.py :
 mpremote reset
 ```
-   古い版から入れ替える場合、不要になったファイルは消して構いません: `mpremote rm :ddns_ca.der`（あれば）。
    **`ddns_key.txt` は消さないでください**（ホスト名を失います）。
 4. ログを見る: `mpremote repl`（抜けるのは Ctrl+]）。
    `wifi: connected, IP (DHCP) = 192.168.x.x ...` → `ntp: synced via ...` → `ddns: OK vpnXXXX.softether.net -> グローバルIP` と出れば成功。
