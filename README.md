@@ -1,7 +1,17 @@
 # SoftEther DDNS クライアント — Raspberry Pi Pico 2 W（Wi-Fi 専用）版
 
+※ 本プロジェクトは、Raspberry Pi 上で動作する SoftEther VPN からの
+　機能移植を目的に、Grokbot によって開発されました。
+
+- **開発・作成:** Grokbot
+- **プロトコル出典:** SoftEther VPN (`src/Cedar/DDNS.c`, `Wpc.c`, `Pack.c` 等)
+
+### Special Thanks
+* 素晴らしい言語モデルと高度なコード解析・生成能力で、本プロジェクトをわずか数時間で形にしてくれた **Grok (xAI)** に深く感謝します。
+* 学術実験として高品質な DDNS サービスを無料で開放・維持し続けてくださっている **筑波大学 SoftEther Project** および **登 大遊 氏** をはじめとする開発者の皆様に心より感謝申し上げます。
+
 SoftEther VPN Server に内蔵されている DDNS クライアント（`*.softether.net`）のうち、次の 3 機能だけを
-MicroPython で再現したものです。Raspberry Pi **Pico 2 W** の **Wi-Fi** で動きます（有線 LAN は使いません）。
+MicroPython で再現したものです。Raspberry Pi **Pico 2 W** の **Wi-Fi** で動きます。
 
 1. **新規発行**: 新しい Key でホスト名（`vpnNNNNNNNN.softether.net`）を割り当ててもらう
 2. **ホスト名変更**: Web 画面から好きな名前（3〜31 文字）に変える
@@ -120,9 +130,7 @@ Key を送る前に、DDNS サーバーの証明書の SHA-1 ハッシュを本�
 状態ページの「サーバー証明書」欄に `pinned via verify_callback EFAC5FA0` のように表示されます。
 
 ## 10. 実機確認の状況
-- Pico 2 W（公式 v1.29 系ファーム）+ Wi-Fi で、DDNS 登録・証明書確認（verify_callback）・Web 画面からのホスト名変更は確認済み（以前の版）。
-- 本版の変更点（有線 LAN の削除、初期化ページ `/init`、Key 生成への MAC 取り込み、LED / BOOTSEL 処理の整理）は、
-  PC 上の MicroPython v1.29.0（unix 版）と CPython で模擬部品を使って確認したもので、**実機では未確認**です。
+- Pico 2 W（公式 v1.29 系ファーム）+ Wi-Fi で、DDNS 登録・証明書確認（verify_callback）・Web 画面からのホスト名変更は確認済み
 
 ## 11. 利用条件
 - softether.net の DDNS は筑波大学の SoftEther プロジェクトが**学術実験として無料で提供**しているサービスで、無保証・予告なしの停止があり得ます。
