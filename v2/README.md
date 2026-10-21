@@ -28,6 +28,8 @@ See `PROTOCOL.md` for communication protocol details, and `THIRD_PARTY_LICENSES.
 | -------------------------- | ------------------------------------------------------------ |
 | `main.py`                  | Startup, DDNS maintenance, status display / hostname change /|
 |                            | init web UI (port 80), watchdog                              |
+| `keyxfer.py`               | Key export / import / delete on the init page                |
+|                            | (buttons with confirmation dialogs)                          |
 | `netif.py`                 | Wi-Fi connection (DHCP) and reconnection                     |
 | `ddns_softether.py`        | Core DDNS client (register / getmyip / Key generation /      |
 |                            | certificate hash verification)                               |
@@ -54,7 +56,7 @@ Files automatically created on the device: `ddns_key.txt` (DDNS Key = proof of h
 2. Edit `config.py` if needed (the defaults are usually fine. If `HOSTNAME = None`, a `vpnNNNNNNNN` name is assigned automatically on first run).
 3. Install `mpremote` on your PC (`pip install mpremote`), then from this folder run:
 ```
-mpremote cp main.py netif.py ddns_softether.py dnsfix.py config.py secrets.py :
+mpremote cp main.py keyxfer.py netif.py ddns_softether.py dnsfix.py config.py secrets.py :
 mpremote reset
 ```
 **Do not delete `ddns_key.txt`** (you will lose the hostname).
@@ -74,25 +76,41 @@ If you cannot check the DHCP assignment on the router, you can find the assigned
 - **Status page `/`** (auto-refreshes every 30 seconds): Wi-Fi status / SSID / signal strength / MAC / IP·gateway·DNS / global IP / hostname·FQDN / last result (0 = success, 132–137, -1 = communication error) / last and next registration / uptime / free memory / time / boot count and last reboot reason / watchdog / certificate verification result. The same data is available as JSON at `/status.json`.
 - **Hostname change**: Enter a new name in the field at the bottom of the status page and press **OK** (confirmation dialog). 3–31 characters, alphanumeric and `-` (cannot start or end with `-`).
   The result (success / 133 = already in use, etc.) is shown in Japanese. The chosen name is saved to `ddns_hostname.txt` and persists across reboots. The old name is released.
-- **Initialization page `/init`** (link at the bottom of the status page: “Initialize (Delete DDNS Key)”): See the “Initialization” section below.
+- **Initialization page `/init`** (link at the bottom of the status page: “初期化・機器入れ替え（DDNS Key）”): See the “Initialization / Device Replacement” section below.
 
-## 4. Initialization (Delete DDNS Key) — Wi-Fi Version Method
-The wired version’s “start with static IP if DHCP fails” initialization mode was not implemented here because a PC cannot be directly connected over Wi-Fi.
-Instead, the simplest reliable method is provided: an **initialization page inside the normal web UI**.
-1. Open `http://<device IP>/init` (also linked from the bottom of the status page). It shows the MAC, IP, current hostname, and whether a Key exists.
-2. In the “Type DELETE to confirm” field, enter `DELETE` in uppercase, then click **Delete Key** → confirm in the dialog.
-3. `ddns_key.txt` and `ddns_hostname.txt` are deleted, and the device automatically reboots after 5 seconds. DDNS registration is paused from deletion until reboot.
-4. After reboot, a new Key is generated and a new hostname (`vpnNNNNNNNN`) is assigned. Check the status page.
-- Anything other than `DELETE` (including lowercase `delete`) does nothing. `GET /reset` does not exist (returns 404).
-- During an active registration, the request is rejected with a “please wait a moment” message.
-- **If Wi-Fi cannot connect** (e.g., SSID/password change), you cannot reach the web UI, so use USB:
-  - Fix Wi-Fi settings: Rewrite `secrets.py`, then `mpremote cp secrets.py :` → `mpremote reset`
-  - Delete the Key: `mpremote rm :ddns_key.txt` and `mpremote rm :ddns_hostname.txt` → `mpremote reset`
-  - Because the WDT may reset the device during file operations, enter “Safe Mode” first (see below).
+## 4. Initialization / Device Replacement (DDNS Key)
+The initialization page is **part of the normal web UI**. Open `http://<device IP>/init` (also linked from the bottom of the status page).
+It shows the MAC, IP, current hostname, and whether a Key exists, and has three buttons. Each button shows a **final confirmation dialog**,
+and the action runs only when you press OK (Cancel, or a browser that blocks JavaScript or dialogs, changes nothing).
+
+| Button | Action |
+|---|---|
+| **Export Key** | Downloads the device’s `ddns_key.txt` (for device replacement / backup) |
+| **Import Key** | Overwrites the current Key with the selected `ddns_key.txt`, deletes `ddns_hostname.txt`, and reboots after 5 seconds |
+| **Delete Key** | Deletes `ddns_key.txt` and `ddns_hostname.txt`, and reboots after 5 seconds |
+
+- After import or delete, the result page waits for the reboot to finish and **automatically returns to the top page**
+  (if it cannot return within 2 minutes, the IP may have changed; reopen the page at the new IP). DDNS registration is paused until the reboot.
+- Only a file (40 hexadecimal characters) can be imported. A wrong length, invalid characters, or a file that is too large (over 2 KB) is rejected with a Japanese error and nothing is changed.
+- During an active registration, the request is rejected with a “please wait a moment” message. `GET /export`, `/import` and `/reset` do not exist (404).
+- After deletion, a new Key is generated and a new hostname (`vpnNNNNNNNN`) is assigned. Check the status page.
+
+### Device Replacement Procedure
+1. On the old device’s `/init`, click **Export Key** and save `ddns_key.txt`.
+2. **Power off the old device** (or disconnect it from the LAN).
+3. Start the new device (leave `HOSTNAME = None` in `config.py`), open its `/init`, select the file from step 1, and click **Import Key**.
+4. After the reboot, confirm on the status page that the hostname is the same as on the old device.
+
+### If Wi-Fi Cannot Connect
+If you cannot reach the web UI (e.g., after an SSID/password change), use USB:
+- Fix Wi-Fi settings: Rewrite `secrets.py`, then `mpremote cp secrets.py :` → `mpremote reset`
+- Delete the Key: `mpremote rm :ddns_key.txt` and `mpremote rm :ddns_hostname.txt` → `mpremote reset`
+- Because the WDT may reset the device during file operations, enter “Safe Mode” first (see below).
 
 > ⚠ **Deleting the Key permanently loses the current hostname.** If you want to keep it, back it up first with
 > `mpremote cp :ddns_key.txt ddns_key_backup.txt` (restore with `mpremote cp ddns_key_backup.txt :ddns_key.txt`).
 > Do not run the same Key on two devices at the same time (the IP will be overwritten alternately).
+> Keep an exported `ddns_key.txt` secret (anyone who has it can take over this hostname).
 > Anyone on the same LAN can open the initialization page (no authentication, same as hostname change). Use only on the LAN.
 
 ## 5. LED (Onboard LED)
@@ -102,7 +120,7 @@ Instead, the simplest reliable method is provided: an **initialization page insi
 | Solid on                         | Normal (DDNS registration successful)           |
 | Slow blink (1 s on / 1 s off)    | Wi-Fi connected but DDNS not registered / error |
 | Fast blink                       | Wi-Fi not connected (connecting / retrying)     |
-| Double blink                     | Waiting for reboot after Key deletion           |
+| Double blink                     | Waiting for reboot after Key delete / import    |
 | Fast blink for first 3 seconds   |Safe mode window (press BOOTSEL during this to   |
 |  after boot                      | enter safe mode)                                |
 ```

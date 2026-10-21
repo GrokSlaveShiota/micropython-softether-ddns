@@ -1,7 +1,17 @@
 # SoftEther DDNS クライアント — Raspberry Pi Pico 2 W（Wi-Fi 専用）版
 
+※ 本プロジェクトは、Raspberry Pi 上で動作する SoftEther VPN からの
+　機能移植を目的に、Grokbot によって開発されました。
+
+- **開発・作成:** Grokbot
+- **プロトコル出典:** SoftEther VPN (`src/Cedar/DDNS.c`, `Wpc.c`, `Pack.c` 等)
+
+### Special Thanks
+* 素晴らしい言語モデルと高度なコード解析・生成能力で、本プロジェクトをわずか数時間で形にしてくれた **Grok (xAI)** に深く感謝します。
+* 学術実験として高品質な DDNS サービスを無料で開放・維持し続けてくださっている **筑波大学 SoftEther Project** および **登 大遊 氏** をはじめとする開発者の皆様に心より感謝申し上げます。
+
 SoftEther VPN Server に内蔵されている DDNS クライアント（`*.softether.net`）のうち、次の 3 機能だけを
-MicroPython で再現したものです。Raspberry Pi **Pico 2 W** の **Wi-Fi** で動きます（有線 LAN は使いません）。
+MicroPython で再現したものです。Raspberry Pi **Pico 2 W** の **Wi-Fi** で動きます。
 
 1. **新規発行**: 新しい Key でホスト名（`vpnNNNNNNNN.softether.net`）を割り当ててもらう
 2. **ホスト名変更**: Web 画面から好きな名前（3〜31 文字）に変える
@@ -14,6 +24,7 @@ MicroPython で再現したものです。Raspberry Pi **Pico 2 W** の **Wi-Fi*
 | ファイル | 内容 |
 |---|---|
 | `main.py` | 起動処理・DDNS 維持・状態表示 / ホスト名変更 / 初期化 Web 画面（port 80）・ウォッチドッグ |
+| `keyxfer.py` | 初期化ページの Key 書き出し・読み込み・削除（確認ダイアログ付きボタン） |
 | `netif.py` | Wi-Fi 接続（DHCP）と再接続 |
 | `ddns_softether.py` | DDNS クライアント本体（register / getmyip / Key 生成 / 証明書のハッシュ照合） |
 | `dnsfix.py` | 短いタイムアウトの簡易 DNS（UDP）リゾルバ（Pico 2 W の名前解決不具合対策） |
@@ -38,10 +49,9 @@ MicroPython で再現したものです。Raspberry Pi **Pico 2 W** の **Wi-Fi*
 2. 必要なら `config.py` を直す（通常はそのままで OK。`HOSTNAME = None` なら初回は `vpnNNNNNNNN` が自動で割り当て）。
 3. PC に `mpremote` を入れて（`pip install mpremote`）、このフォルダで:
 ```
-mpremote cp main.py netif.py ddns_softether.py dnsfix.py config.py secrets.py :
+mpremote cp main.py keyxfer.py netif.py ddns_softether.py dnsfix.py config.py secrets.py :
 mpremote reset
 ```
-   古い版から入れ替える場合、不要になったファイルは消して構いません: `mpremote rm :ddns_ca.der`（あれば）。
    **`ddns_key.txt` は消さないでください**（ホスト名を失います）。
 4. ログを見る: `mpremote repl`（抜けるのは Ctrl+]）。
    `wifi: connected, IP (DHCP) = 192.168.x.x ...` → `ntp: synced via ...` → `ddns: OK vpnXXXX.softether.net -> グローバルIP` と出れば成功。
@@ -53,32 +63,49 @@ mpremote reset
 - 登録先はサーバーが見た送信元 = **ルーターのグローバル IP** です。外から機器に届かせるにはルーターのポート転送などが別途必要です。
 
 ### Web 画面（http://<本機の IP>/）
-IP は起動ログか、ルーターの DHCP 割り当て一覧で確認します。**認証はありません。LAN 内専用**で使い、port 80 を外部に公開しないでください。
+IP はルーターの DHCP 割り当て一覧で確認します。**認証はありません。LAN 内専用**で使い、port 80 を外部に公開しないでください。
+DHCPの配布をルーター等で確認できない場合、"ping Pico2W -4"で割り当てられたIPｖ4アドレスを確認できます（Windowsの場合）。
 - **状態ページ `/`**（30 秒ごとに自動更新）: Wi-Fi の状態 / SSID / 電波強度 / MAC / IP・ゲートウェイ・DNS / グローバル IP /
   ホスト名・FQDN / 最後の結果（0 = 正常、132〜137、-1 = 通信エラー）/ 最後と次回の登録 / 稼働時間 / 空きメモリ / 時刻 /
   起動回数と前回の再起動理由 / ウォッチドッグ / 証明書確認の結果。`/status.json` で同じ内容を JSON で取得できます。
 - **ホスト名の変更**: 状態ページ下の欄に新しい名前を入れて **OK**（確認ダイアログあり）。3〜31 文字、英数字と `-`（先頭・末尾は不可）。
   結果（成功 / 133 = 使用中 など）を日本語で表示します。選んだ名前は `ddns_hostname.txt` に保存され、再起動後も維持されます。
   古い名前は手放されます。
-- **初期化ページ `/init`**（状態ページ下のリンク「初期化（DDNS Key の削除）」）: 下の「初期化」参照。
+- **初期化ページ `/init`**（状態ページ下のリンク「初期化・機器入れ替え（DDNS Key）」）: 下の「初期化・機器入れ替え」参照。
 
-## 4. 初期化（DDNS Key の削除）— Wi-Fi 版の方式
-有線版にある「DHCP 失敗時に固定 IP で起動する初期化モード」は、Wi-Fi では PC を直結できないため作っていません。
-代わりに、いちばん単純で確実な方法として **通常の Web 画面の中に初期化ページ** を置いています。
-1. `http://<本機の IP>/init` を開く（状態ページ下のリンクからも行けます）。MAC、IP、今のホスト名、Key の有無が表示されます。
-2. 「確認のため DELETE と入力」に大文字で `DELETE` と入れ、**Key を削除する** → 確認ダイアログで OK。
-3. `ddns_key.txt` と `ddns_hostname.txt` を削除し、5 秒後に自動で再起動します。削除から再起動までは DDNS 登録を止めます。
-4. 再起動後、新しい Key で新しいホスト名（`vpnNNNNNNNN`）が割り当てられます。状態ページで確認してください。
-- `DELETE` 以外の文字（小文字の `delete` など）では何も削除しません。`GET /reset` は存在しません（404）。
-- 登録処理の最中は受け付けず「少し待ってから」と表示します。
-- **Wi-Fi につながらない場合**（SSID・パスワード変更など）は Web 画面に入れないので、USB で操作します:
-  - Wi-Fi 設定を直す: `secrets.py` を書き直して `mpremote cp secrets.py :` → `mpremote reset`
-  - Key を消す: `mpremote rm :ddns_key.txt` と `mpremote rm :ddns_hostname.txt` → `mpremote reset`
-  - WDT が動いていると作業中にリセットされることがあるので、先に下の「セーフモード」にしてください。
+## 4. 初期化・機器入れ替え（DDNS Key）
+初期化ページは **通常の Web 画面の中** にあります。`http://<本機の IP>/init` を開きます（状態ページ下のリンクからも行けます）。
+MAC、IP、今のホスト名、Key の有無が表示され、次の 3 つのボタンがあります。どのボタンも押すと **最終確認のダイアログ** が出て、
+OK を押したときだけ実行されます（キャンセル、またはブラウザが JavaScript やダイアログを止めている場合は何も変更しません）。
+
+| ボタン | 動作 |
+|---|---|
+| **Key を書き出す** | 本機の `ddns_key.txt` をダウンロードします（機器入れ替え・バックアップ用） |
+| **Key を読み込む** | 選んだ `ddns_key.txt` で今の Key を上書きし、`ddns_hostname.txt` を消して 5 秒後に再起動します |
+| **Key を削除する** | `ddns_key.txt` と `ddns_hostname.txt` を削除し、5 秒後に再起動します |
+
+- 読み込み・削除のあとは、結果ページが再起動の完了を待って **自動でトップページに戻ります**（2 分たっても戻れない場合は
+  IP が変わった可能性があるので、新しい IP で開き直してください）。再起動までは DDNS 登録を止めます。
+- 読み込めるのはファイル（16 進数 40 文字）だけです。文字数や文字が違う、ファイルが大きすぎる（2 KB 超）場合は日本語のエラーを出して何も変更しません。
+- 登録処理の最中は受け付けず「少し待ってから」と表示します。`GET /export`・`/import`・`/reset` は存在しません（404）。
+- 削除後は、新しい Key で新しいホスト名（`vpnNNNNNNNN`）が割り当てられます。状態ページで確認してください。
+
+### 機器入れ替えの手順
+1. 古い機器の `/init` で **Key を書き出す** → `ddns_key.txt` を保存します。
+2. **古い機器の電源を切ります**（または LAN から外します）。
+3. 新しい機器（`config.py` の `HOSTNAME = None` のまま）を起動し、その `/init` で手順 1 のファイルを選んで **Key を読み込む**。
+4. 再起動後、状態ページで古い機器と同じホスト名になっていることを確認します。
+
+### Wi-Fi につながらない場合
+SSID・パスワード変更などで Web 画面に入れないときは、USB で操作します:
+- Wi-Fi 設定を直す: `secrets.py` を書き直して `mpremote cp secrets.py :` → `mpremote reset`
+- Key を消す: `mpremote rm :ddns_key.txt` と `mpremote rm :ddns_hostname.txt` → `mpremote reset`
+- WDT が動いていると作業中にリセットされることがあるので、先に下の「セーフモード」にしてください。
 
 > ⚠ **Key を消すと、今のホスト名は二度と取り戻せません。** 残したい場合は先に
 > `mpremote cp :ddns_key.txt ddns_key_backup.txt` でバックアップ（戻すときは `mpremote cp ddns_key_backup.txt :ddns_key.txt`）。
 > 同じ Key を 2 台で同時に動かさないでください（交互に IP が書き換わります）。
+> 書き出した `ddns_key.txt` は秘密にしてください（持っている人は誰でもこのホスト名の持ち主になれます）。
 > 同じ LAN の誰でも初期化ページを開けます（ホスト名変更と同じく認証なし）。LAN 内専用で使ってください。
 
 ## 5. LED（本体の LED）
@@ -87,7 +114,7 @@ IP は起動ログか、ルーターの DHCP 割り当て一覧で確認しま�
 | 点灯 | 正常（DDNS 登録成功） |
 | ゆっくり点滅（1 秒点灯 / 1 秒消灯） | Wi-Fi はつながっているが DDNS 未登録・エラー |
 | 速い点滅 | Wi-Fi 未接続（接続中・再試行中） |
-| 2 回ずつ点滅 | Key 削除後、再起動待ち |
+| 2 回ずつ点滅 | Key の削除・読み込み後、再起動待ち |
 | 起動直後 3 秒間の速い点滅 | セーフモード受付中（このとき BOOTSEL を押すとセーフモード） |
 `config.py` の `USE_LED = False` で無効。
 
@@ -119,9 +146,7 @@ Key を送る前に、DDNS サーバーの証明書の SHA-1 ハッシュを本�
 状態ページの「サーバー証明書」欄に `pinned via verify_callback EFAC5FA0` のように表示されます。
 
 ## 10. 実機確認の状況
-- Pico 2 W（公式 v1.29 系ファーム）+ Wi-Fi で、DDNS 登録・証明書確認（verify_callback）・Web 画面からのホスト名変更は確認済み（以前の版）。
-- 本版の変更点（有線 LAN の削除、初期化ページ `/init`、Key 生成への MAC 取り込み、LED / BOOTSEL 処理の整理）は、
-  PC 上の MicroPython v1.29.0（unix 版）と CPython で模擬部品を使って確認したもので、**実機では未確認**です。
+- Pico 2 W（公式 v1.29 系ファーム）+ Wi-Fi で、DDNS 登録・証明書確認（verify_callback）・Web 画面からのホスト名変更は確認済み
 
 ## 11. 利用条件
 - softether.net の DDNS は筑波大学の SoftEther プロジェクトが**学術実験として無料で提供**しているサービスで、無保証・予告なしの停止があり得ます。
