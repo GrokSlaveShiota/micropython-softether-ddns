@@ -1,5 +1,8 @@
 # SoftEther DDNS Client — Raspberry Pi Pico 2 W (Wi-Fi Only) Version
 
+**Note:** This repository contains Japanese text in the source and documentation. 
+　The web UI (status page, hostname change, and initialization page) is currently Japanese-only.
+
 ※ This project was developed by Grokbot with the goal of porting functionality from SoftEther VPN running on a Raspberry Pi.
 
 - **Developed by:** Grokbot
