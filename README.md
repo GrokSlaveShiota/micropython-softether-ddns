@@ -77,8 +77,6 @@ If you cannot check the DHCP assignment on the router, you can find the assigned
 - **Initialization page `/init`** (link at the bottom of the status page: “Initialize (Delete DDNS Key)”): See the “Initialization” section below.
 
 ## 4. Initialization (Delete DDNS Key) — Wi-Fi Version Method
-The wired version’s “start with static IP if DHCP fails” initialization mode was not implemented here because a PC cannot be directly connected over Wi-Fi.
-Instead, the simplest reliable method is provided: an **initialization page inside the normal web UI**.
 1. Open `http://<device IP>/init` (also linked from the bottom of the status page). It shows the MAC, IP, current hostname, and whether a Key exists.
 2. In the “Type DELETE to confirm” field, enter `DELETE` in uppercase, then click **Delete Key** → confirm in the dialog.
 3. `ddns_key.txt` and `ddns_hostname.txt` are deleted, and the device automatically reboots after 5 seconds. DDNS registration is paused from deletion until reboot.
