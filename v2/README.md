@@ -1,5 +1,10 @@
 # SoftEther DDNS Client — Raspberry Pi Pico 2 W (Wi-Fi Only) Version
 
+**Note:** This repository contains Japanese text in the source and documentation. 
+
+The web UI (status page, hostname change, and initialization page) is currently Japanese-only.
+
+
 ※ This project was developed by Grokbot with the goal of porting functionality from SoftEther VPN running on a Raspberry Pi.
 
 - **Developed by:** Grokbot
@@ -21,10 +26,13 @@ See `PROTOCOL.md` for communication protocol details, and `THIRD_PARTY_LICENSES.
 ```
 | File                       | Description                                                  |
 | -------------------------- | ------------------------------------------------------------ |
-| `main.py`                  | Startup, DDNS maintenance, status display / hostname change / init web UI (port 80), watchdog |
+| `main.py`                  | Startup, DDNS maintenance, status display / hostname change /|
+|                            | init web UI (port 80), watchdog                              |
 | `netif.py`                 | Wi-Fi connection (DHCP) and reconnection                     |
-| `ddns_softether.py`        | Core DDNS client (register / getmyip / Key generation / certificate hash verification) |
-| `dnsfix.py`                | Simple short-timeout DNS (UDP) resolver (workaround for Pico 2 W name resolution issues) |
+| `ddns_softether.py`        | Core DDNS client (register / getmyip / Key generation /      |
+|                            | certificate hash verification)                               |
+| `dnsfix.py`                | Simple short-timeout DNS (UDP) resolver                      |
+|                            | (workaround for Pico 2 W name resolution issues)             |
 | `config.py`                | Per-device settings (timeouts, watchdog, LED, etc.)          |
 | `secrets_example.py`       | Template for `secrets.py` (Wi-Fi SSID / password)            |
 | `PROTOCOL.md`              | DDNS protocol investigation notes                            |
@@ -49,7 +57,6 @@ Files automatically created on the device: `ddns_key.txt` (DDNS Key = proof of h
 mpremote cp main.py netif.py ddns_softether.py dnsfix.py config.py secrets.py :
 mpremote reset
 ```
-When replacing an older version, you may delete obsolete files: `mpremote rm :ddns_ca.der` (if present).
 **Do not delete `ddns_key.txt`** (you will lose the hostname).
 4. View the logs: `mpremote repl` (exit with Ctrl+]).
 Success is indicated by output like:
@@ -90,13 +97,14 @@ Instead, the simplest reliable method is provided: an **initialization page insi
 
 ## 5. LED (Onboard LED)
 ```
-| Display                          | Meaning                                      |
-| -------------------------------- | -------------------------------------------- |
-| Solid on                         | Normal (DDNS registration successful)        |
+| Display                          | Meaning                                         |
+| -------------------------------- | ----------------------------------------------- |
+| Solid on                         | Normal (DDNS registration successful)           |
 | Slow blink (1 s on / 1 s off)    | Wi-Fi connected but DDNS not registered / error |
-| Fast blink                       | Wi-Fi not connected (connecting / retrying)  |
-| Double blink                     | Waiting for reboot after Key deletion        |
-| Fast blink for first 3 seconds after boot | Safe mode window (press BOOTSEL during this to enter safe mode) |
+| Fast blink                       | Wi-Fi not connected (connecting / retrying)     |
+| Double blink                     | Waiting for reboot after Key deletion           |
+| Fast blink for first 3 seconds   |Safe mode window (press BOOTSEL during this to   |
+|  after boot                      | enter safe mode)                                |
 ```
 Disable with `USE_LED = False` in `config.py`.
 
