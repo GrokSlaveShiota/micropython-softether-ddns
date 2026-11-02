@@ -20,8 +20,11 @@ Each folder is a complete, independent set of files. Use the one that matches yo
 | --- | --- | --- | --- |
 | [`Pico2W_ver`](Pico2W_ver/) | Raspberry Pi Pico 2 W | Wi-Fi (DHCP) | Official MicroPython for RPI_PICO2_W |
 | [`Wiznet W5100S-EVB-Pico2_ver`](Wiznet%20W5100S-EVB-Pico2_ver/) | WIZnet W5100S-EVB-Pico2 | Wired LAN (DHCP, fixed-IP fallback 192.168.14.199) | WIZnet MicroPython (`LWIP-W5100S_EVB_PICO2`) |
+| [`Wiznet W5100S-EVB-Pico2_ver_StaticIP_draft`](Wiznet%20W5100S-EVB-Pico2_ver_StaticIP_draft/) (**draft**) | WIZnet W5100S-EVB-Pico2 | Wired LAN, plus a static IP that can be set from the web UI (`/init`) | WIZnet MicroPython (`LWIP-W5100S_EVB_PICO2`) |
 
 Files from different folders cannot be mixed.
+
+The `_StaticIP_draft` folder is a draft. If a static IP is saved (`netcfg.json`), the device always starts with that IP. Without it, the device uses DHCP and falls back to 192.168.14.199 if DHCP fails. To return to DHCP, delete the setting from `/init`, or delete `netcfg.json` over USB (`mpremote rm :netcfg.json`).
 
 ## Terms of Use
 The softether.net DDNS service is provided free of charge as an academic experiment by the University of Tsukuba SoftEther Project, as-is and without warranty, and may be discontinued without notice. If you incorporate this into a product, explain this to your customers.
@@ -55,8 +58,11 @@ SoftEther VPN の DDNS クライアント（`*.softether.net`）を、Raspberry 
 | --- | --- | --- | --- |
 | [`Pico2W_ver`](Pico2W_ver/) | Raspberry Pi Pico 2 W | Wi-Fi（DHCP） | MicroPython 公式（RPI_PICO2_W） |
 | [`Wiznet W5100S-EVB-Pico2_ver`](Wiznet%20W5100S-EVB-Pico2_ver/) | WIZnet W5100S-EVB-Pico2 | 有線 LAN（DHCP、取れない場合は固定 IP 192.168.14.199） | WIZnet 版 MicroPython（`LWIP-W5100S_EVB_PICO2`） |
+| [`Wiznet W5100S-EVB-Pico2_ver_StaticIP_draft`](Wiznet%20W5100S-EVB-Pico2_ver_StaticIP_draft/)（**ドラフト**） | WIZnet W5100S-EVB-Pico2 | 有線 LAN。Web 画面（`/init`）から固定 IP を設定可能 | WIZnet 版 MicroPython（`LWIP-W5100S_EVB_PICO2`） |
 
 違うフォルダのファイルを混ぜて使うことはできません。
+
+`_StaticIP_draft` フォルダはドラフト版です。固定 IP を保存すると（`netcfg.json`）、必ずその IP で起動します。保存していなければ DHCP で取得し、取れない場合は 192.168.14.199 で起動します。DHCP に戻すには、`/init` から設定を削除するか、USB で `netcfg.json` を削除してください（`mpremote rm :netcfg.json`）。
 
 ## 利用条件
 softether.net の DDNS サービスは、筑波大学 SoftEther プロジェクトが学術実験として無償で提供しているもので、無保証です。予告なく終了することがあります。製品に組み込んで納品する場合は、このことをお客様に説明してください。
