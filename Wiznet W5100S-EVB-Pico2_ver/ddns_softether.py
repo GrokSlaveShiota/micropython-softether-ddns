@@ -21,6 +21,10 @@ except ImportError:
     import ubinascii as binascii
 import os, struct, time
 try:
+    import gc
+except ImportError:
+    gc = None
+try:
     from dnsfix import getaddrinfo as _getaddrinfo   # built-in DNS first, UDP DNS fallback
 except ImportError:
     _getaddrinfo = socket.getaddrinfo
@@ -38,6 +42,19 @@ feed = None          # callable: feed the watchdog between blocking steps (set b
 def _feed():
     if feed:
         feed()
+
+def is_nomem(e):
+    """True if e looks like a transient out-of-buffers / out-of-memory error
+    (lwIP ENOBUFS 105 / ENOMEM 12, MemoryError, mbedTLS SSL_ALLOC_FAILED -0x7F00)."""
+    if isinstance(e, MemoryError):
+        return True
+    code = getattr(e, "errno", None)
+    if code is None and isinstance(e, OSError) and e.args and isinstance(e.args[0], int):
+        code = e.args[0]
+    if code in (105, 12, -0x7F00):
+        return True
+    t = str(e)
+    return "ENOBUFS" in t or "ENOMEM" in t or "Errno 105" in t or "Errno 12]" in t
 UA = "Mozilla/5.0 (Windows NT 6.3; WOW64; rv:29.0) Gecko/20100101 Firefox/29.0"
 CERT_HASHES = (  # DDNS_CERT_HASH: SHA-1 of server cert (DER), any match OK
     "78BF0499A99396907C9F49DD13571C81FE26E6F5", "439BAFA75A6EE5671FC9F9A02D34FF29881761A0",
@@ -199,31 +216,34 @@ def _https_post(host, path, body, timeout=None, sni=SNI):
     global last_tls
     # connect to the resolved IP; TLS SNI / Host header stay as before
     ai = _getaddrinfo(host, 443, 0, socket.SOCK_STREAM)[0]
-    s = socket.socket(ai[0], socket.SOCK_STREAM)
-    s.settimeout(timeout or SOCK_TIMEOUT)
-    _feed()
-    s.connect(ai[-1])
-    _feed()
+    if gc:
+        gc.collect()                          # TLS needs a large contiguous heap block
+    raw = socket.socket(ai[0], socket.SOCK_STREAM)
+    s = None                                  # TLS socket once the handshake succeeded
     try:
-        s, last_tls = _tls_wrap(s, host, sni)
-    except Exception:
-        try:
-            s.close()
-        except Exception:
-            pass
-        raise
-    req = ("POST %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n"
-           "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\n"
-           "Connection: close\r\n\r\n" % (path, host, UA, len(body))).encode() + body
-    s.write(req) if hasattr(s, "write") else s.sendall(req)
-    data = b""
-    while True:
+        raw.settimeout(timeout or SOCK_TIMEOUT)
         _feed()
-        c = s.read(2048) if hasattr(s, "read") else s.recv(2048)
-        if not c:
-            break
-        data += c
-    s.close()
+        raw.connect(ai[-1])
+        _feed()
+        s, last_tls = _tls_wrap(raw, host, sni)
+        req = ("POST %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n"
+               "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\n"
+               "Connection: close\r\n\r\n" % (path, host, UA, len(body))).encode() + body
+        s.write(req) if hasattr(s, "write") else s.sendall(req)
+        data = b""
+        while True:
+            _feed()
+            c = s.read(2048) if hasattr(s, "read") else s.recv(2048)
+            if not c:
+                break
+            data += c
+    finally:                                  # every path (timeout, handshake / read error)
+        for x in (s, raw):
+            if x is not None:
+                try:
+                    x.close()
+                except Exception:
+                    pass
     i = data.find(b"\r\n\r\n")
     head, payload = data[:i], data[i + 4:]
     status = int(head.split(b" ", 2)[1].decode())
@@ -373,6 +393,7 @@ class DDNSClient:
         self.fqdn = self.hostname = self.ipv4 = None
         self.last_error = None
         self.last_exc = None
+        self.last_nomem = False        # last register_once() failed with ENOBUFS / ENOMEM
 
     def register(self, new_hostname=None):
         """Features 1/3 (new_hostname=None) and 2 (new_hostname='name'). Returns response dict."""
@@ -411,11 +432,13 @@ class DDNSClient:
         """One attempt, never raises. Returns (error_code, seconds_until_next).
         error_code -1 = network/TLS/protocol exception (text in self.last_exc)."""
         self.last_exc = None
+        self.last_nomem = False
         try:
             err = self.register(new_hostname).get("error", 0)
         except Exception as e:
             err = -1
             self.last_exc = str(e)
+            self.last_nomem = is_nomem(e)
         self.last_error = err
         if err == 0:
             wait = _rand(3600, 7200)        # OK: 1-2 h

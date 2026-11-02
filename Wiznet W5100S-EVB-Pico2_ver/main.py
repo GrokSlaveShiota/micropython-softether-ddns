@@ -1,18 +1,21 @@
-# main.py - SoftEther DDNS クライアント（Raspberry Pi Pico 2 W / Wi-Fi 専用）
-# Wi-Fi (DHCP)、DDNS 維持 (register + getmyip)、状態・ホスト名変更 Web UI、初期化（Key 削除）ページ、
-# ウォッチドッグ、例外時の自動再起動、起動回数の記録、LED 表示、セーフモード。
+# main.py - SoftEther DDNS クライアント（WIZnet W5100S-EVB-Pico2 / 有線 LAN 専用）
+# 有線 LAN (W5100S, 起動時 DHCP / 取得できない・ケーブル未接続なら固定 IP 192.168.14.199 で起動し、
+# 接続後は DHCP を定期的に再試行)、DDNS 維持 (register + getmyip)、状態・ホスト名変更 Web UI、
+# 初期化（Key 削除）ページ、ウォッチドッグ、例外時の自動再起動、起動回数の記録、LED 表示、セーフモード。
+import time
 try:
     import asyncio
 except ImportError:
     import uasyncio as asyncio
-import time, json, gc, struct, os, sys
+import json, gc, struct, os, sys
 try:
     import usocket as socket
 except ImportError:
     import socket
-import dnsfix          # UDP DNS fallback (Pico 2 W: built-in getaddrinfo -> OSError -2)
+import dnsfix          # UDP DNS resolver with short timeouts (WDT-safe)
 import ddns_softether as d
 import netif
+import keyxfer      # DDNS key export / import (device replacement)
 try:
     import config
 except ImportError:
@@ -25,7 +28,12 @@ except ImportError:    # CPython / unix test
 def cfg(name, default):
     return getattr(config, name, default)
 
-WIFI_TIMEOUT = cfg("WIFI_TIMEOUT", 30)
+LAN_PINS = cfg("LAN_PINS", None)                 # None = ボード既定 (netif.LAN_PINS: SPI0 GP16-21)
+LAN_DHCP_TIMEOUT = cfg("LAN_DHCP_TIMEOUT", netif.DHCP_TIMEOUT_S)   # 秒。この間 DHCP が取れなければ固定 IP
+LAN_LINK_WAIT = cfg("LAN_LINK_WAIT", netif.LINK_WAIT_S)            # 秒。この間リンクが立たなければ「ケーブル未接続」
+LAN_DHCP_RETRY = cfg("LAN_DHCP_RETRY", netif.DHCP_RETRY_S)         # 固定 IP の間、DHCP を再試行する間隔（秒、0 で無効）
+LAN_FALLBACK_IP = cfg("LAN_FALLBACK_IP", netif.FALLBACK_IP)        # (IP, mask, GW, DNS)
+NET_HOSTNAME = cfg("NET_HOSTNAME", netif.NET_HOSTNAME)             # DHCP サーバーに送る機器名
 HOSTNAME = cfg("HOSTNAME", None)       # Web UI で変えた名前 (HOSTNAME_FILE) が優先
 HOSTNAME_FILE = "ddns_hostname.txt"
 KEY_FILE = "ddns_key.txt"
@@ -34,12 +42,13 @@ WEB_PORT = cfg("WEB_PORT", 80)
 TZ_OFFSET = cfg("TZ_OFFSET", 9 * 3600)
 USE_NTP = cfg("USE_NTP", True)
 NTP_HOST = cfg("NTP_HOST", "pool.ntp.org")
+NTP_RESYNC_S = cfg("NTP_RESYNC_S", 24 * 3600)   # 同期後の再同期間隔（149 時間未満にすること）
 USE_WDT = cfg("USE_WDT", True)
 WDT_TIMEOUT_MS = cfg("WDT_TIMEOUT_MS", 8000)
 NO_SUCCESS_REBOOT_S = cfg("NO_SUCCESS_REBOOT_S", 6 * 3600)
 CRASH_REBOOT_DELAY_S = cfg("CRASH_REBOOT_DELAY_S", 10)
 USE_LED = cfg("USE_LED", True)
-LED_PIN = cfg("LED_PIN", "LED")      # Pico 2 W: CYW43 側の LED
+LED_PIN = cfg("LED_PIN", 25)         # W5100S-EVB-Pico2: GPIO25 (CYW43 は無い)
 ALIVE_LIMIT_MS = 120000     # メインループがこの時間止まったら WDT への給餌をやめる (=リセット)
 BOOTINFO_FILE = "bootinfo.json"
 GETMYIP_OK = (600, 1200)    # 上流と同じ: 成功後 10〜20 分
@@ -69,7 +78,7 @@ BOOT = ticks_ms()
 ddns = None
 net = None
 wdt = None
-MODE = "normal"          # Wi-Fi 版は常に normal（初期化は /init ページ）
+MODE = "normal"          # 常に normal（初期化は /init ページ。固定 IP でも同じ画面）
 
 def _exists(p):
     try:
@@ -101,8 +110,20 @@ st = {"last_ticks": None, "next_ticks": None, "last_wall": None, "ok_ticks": Non
       "web_ticks": ticks_ms(), "fatal": None, "boot": {}, "resetting": False}
 lock = asyncio.Lock()   # register / change_hostname を同時に走らせない
 
+# ticks_ms() は約 298 時間で一周し、ticks_diff() は約 149 時間で符号が反転するため、
+# 差分を少しずつ積み上げて稼働時間を数える（alive() から頻繁に呼ばれる）
+_up = [0, BOOT]   # [累積 ms, 前回の ticks]
+
 def uptime():
-    return ticks_diff(ticks_ms(), BOOT) // 1000
+    t = ticks_ms()
+    _up[0] += ticks_diff(t, _up[1])
+    _up[1] = t
+    return _up[0] // 1000
+
+def up_ms():
+    """起動からの経過 ms（一周しない）。149 時間を超えうる間隔の比較はこちらを使う。"""
+    uptime()
+    return _up[0]
 
 def wall(t=None):
     if not st["ntp"]:
@@ -112,6 +133,7 @@ def wall(t=None):
 
 def alive():
     st["alive"] = ticks_ms()
+    uptime()
 
 # ---------------- watchdog / reset / boot info ----------------
 def feed():
@@ -207,7 +229,9 @@ async def led_task():
         if st["resetting"]:
             pat = (1, 0, 1, 0, 0, 0, 0, 0)               # 2 回点滅: Key 削除後の再起動待ち
         elif net is None or not net.is_up():
-            pat = (1, 0) * 4                             # 速い点滅: ネットワーク未接続
+            pat = (1, 0) * 4                             # 速い点滅: ネットワーク未接続（ケーブル抜け・初期化失敗）
+        elif net.fallback:
+            pat = (1, 0, 0, 0, 0, 0, 0, 0)               # 2 秒に 1 回短く点灯: 固定 IP（DHCP なし）で動作中
         elif ddns is None or ddns.last_error != 0:
             pat = (1, 1, 1, 1, 0, 0, 0, 0)               # ゆっくり点滅: DDNS 未登録 / エラー
         else:
@@ -217,11 +241,11 @@ async def led_task():
         await asyncio.sleep(0.25)
 
 # ---------------- NTP ----------------
-def ntp_sync():
-    """Minimal SNTP client (instead of ntptime, whose getaddrinfo fails on Pico 2 W)."""
-    if not USE_NTP or st["ntp"]:
+def ntp_sync(resync=False):
+    """Minimal SNTP client (instead of ntptime: dnsfix lookup + short, WDT-safe timeouts)."""
+    if not USE_NTP or (st["ntp"] and not resync):
         return
-    for _ in range(2):
+    for _ in range(1):                   # 1 回だけ（失敗時は ddns_task が 60 秒後に再試行）
         s = None
         try:
             addr = dnsfix.getaddrinfo(NTP_HOST, 123, 0, socket.SOCK_DGRAM)[0][-1]
@@ -247,16 +271,31 @@ def ntp_sync():
                 s.close()
 
 # ---------------- DDNS task (normal mode) ----------------
-def check_myip(now):
+NOMEM_RETRY_WAIT = 1.5     # ENOBUFS / ENOMEM: gc.collect(), wait this many seconds, retry once
+
+async def nomem_pause(what, e):
+    print("%s: %s -> gc.collect() and retry once" % (what, e))
+    gc.collect()                         # also closes unreferenced sockets (finaliser)
+    alive()
+    await asyncio.sleep(NOMEM_RETRY_WAIT)
+    alive()
+
+async def check_myip(now):
     """Upstream behaviour: getmyip every 10-20 min (1-5 min after failure); IP change -> register now."""
     changed = False
-    try:
-        ip = d.getmyip()
-        st["myip_err"] = None
-    except Exception as e:
-        ip = None
-        st["myip_err"] = str(e)
-        print("getmyip: failed", e)
+    for attempt in range(2):
+        try:
+            ip = d.getmyip()
+            st["myip_err"] = None
+            break
+        except Exception as e:
+            ip = None
+            if attempt == 0 and d.is_nomem(e):
+                await nomem_pause("getmyip", e)
+                continue
+            st["myip_err"] = str(e)
+            print("getmyip: failed", e)
+            break
     if ip:
         if ip != st["myip"]:
             print("getmyip:", st["myip"], "->", ip)
@@ -268,11 +307,19 @@ def check_myip(now):
         st["myip_next"] = ticks_add(now, d._rand(*GETMYIP_NG) * 1000)
     return changed
 
-def do_register():
-    err, wait = ddns.register_once()
+async def register_once(name=None):
+    """ddns.register_once() + one retry after gc.collect() on ENOBUFS / ENOMEM."""
+    err, wait = ddns.register_once(name)
+    if err == -1 and ddns.last_nomem:
+        await nomem_pause("ddns", ddns.last_exc)
+        err, wait = ddns.register_once(name)
+    return err, wait
+
+async def do_register():
+    err, wait = await register_once()
     want = st["wanted"]
     if err == 0 and want and (ddns.hostname or "").lower() != want:
-        err, wait = ddns.register_once(want)
+        err, wait = await register_once(want)
         if err == 0:
             save_wanted(want)
         elif err in NAME_ERRORS:
@@ -287,13 +334,23 @@ async def ddns_task():
     ddns = d.DDNSClient(key_path=KEY_FILE, machine_name=MACHINE_NAME)
     next_reg = st["myip_next"] = ticks_ms()
     was_up = True
+    last_mode = None
+    ntp_next = ticks_ms()
+    ok_up = None                            # 最後に登録成功した時の up_ms()
+    mode_up, seen_mt = 0, net.mode_ticks    # DHCP / 固定 IP が最後に切り替わった時の up_ms()
     while True:
         alive()
         if st["resetting"]:                  # Key を削除した -> 再起動まで何もしない
             await asyncio.sleep(1)
             continue
-        now = ticks_ms()
-        if NO_SUCCESS_REBOOT_S and ticks_diff(now, st["ok_ticks"] or BOOT) > NO_SUCCESS_REBOOT_S * 1000:
+        # ticks 同士の比較は 149 時間を超えると符号が反転するので（mode_ticks は起動時のまま
+        # 何日も変わらない）、一周しない up_ms() で「最後の成功 / 切替」からの経過を数える
+        if net.mode_ticks != seen_mt:
+            seen_mt = net.mode_ticks
+            mode_up = up_ms()               # DHCP / 固定 IP が切り替わった時点から数える
+        ref = mode_up if ok_up is None or mode_up > ok_up else ok_up
+        if (NO_SUCCESS_REBOOT_S and not net.fallback            # 固定 IP の間は再起動しない（DHCP は自動で再試行）
+                and up_ms() - ref > NO_SUCCESS_REBOOT_S * 1000):
             hard_reset("%d 秒間 DDNS 登録に成功しなかったため再起動" % NO_SUCCESS_REBOOT_S)
         if not await net.ensure():
             if was_up:
@@ -301,30 +358,41 @@ async def ddns_task():
             was_up = False
             await asyncio.sleep(2)
             continue
-        if not was_up:                      # 経路が変わった可能性 -> すぐ確認・登録
+        if not was_up or net.mode != last_mode:   # ケーブル復帰 / DHCP⇔固定 IP 切替: 経路が変わった -> すぐ確認・登録
             was_up = True
+            last_mode = net.mode
             next_reg = st["myip_next"] = ticks_ms()
         net.log_once()                      # IP を NTP・DDNS より先にログに出す
-        ntp_sync()
-        alive()
         now = ticks_ms()
         if ticks_diff(now, st["myip_next"]) >= 0:
-            if check_myip(now):
+            if await check_myip(now):
                 next_reg = now              # グローバル IP が変わった -> 即再登録
         alive()
         now = ticks_ms()
         if ticks_diff(now, next_reg) >= 0:
             async with lock:
-                err, wait = do_register()
+                err, wait = await do_register()
             st["last_ticks"] = ticks_ms()
             st["last_wall"] = wall()
             next_reg = st["next_ticks"] = ticks_add(ticks_ms(), wait * 1000)
             if err == 0:
                 st["ok_ticks"] = ticks_ms()
+                ok_up = up_ms()
                 print("ddns: OK", ddns.fqdn, "->", ddns.ipv4)
+                if st["myip_err"]:          # 通信はできている -> 失敗した getmyip を 1〜5 分待たずにやり直す
+                    st["myip_next"] = ticks_add(ticks_ms(), 5000)
             else:
                 print("ddns: failed", err, ddns.last_exc or "")
             gc.collect()
+        # NTP は表示用の時刻だけなので DDNS 登録のあとに回す。失敗したら 60 秒後に再試行
+        # 同期後も RTC のずれ（月に数分）を直すため NTP_RESYNC_S ごとに合わせ直す
+        if ticks_diff(ticks_ms(), ntp_next) >= 0:
+            synced = st["ntp"]
+            ntp_sync(resync=synced)
+            ntp_next = ticks_add(ticks_ms(), NTP_RESYNC_S * 1000 if st["ntp"] else 60000)
+            if st["ntp"] and st["last_ticks"] is not None and st["last_wall"] is None:
+                # 時刻合わせ前に済んだ登録の時刻を、経過時間から逆算して表示する
+                st["last_wall"] = wall(time.time() - ticks_diff(ticks_ms(), st["last_ticks"]) // 1000)
         await asyncio.sleep(2)
 
 # ---------------- status ----------------
@@ -375,13 +443,18 @@ def dur(sec):
 def html(s):
     ok = s["last_result"] == 0
     rows = [
-        ("接続方式", "Wi-Fi（接続中）" if s.get("connected") else "Wi-Fi（未接続・再接続中）"),
+        ("接続方式", "有線 LAN (W5100S)" if s.get("iface") == "lan" else
+                     "未接続" + ("（%s）" % esc(s.get("lan_error")) if s.get("lan_error") else "")),
+        ("リンク（ケーブル）", "接続中" if s.get("link") else ("<b style=\"color:red\">切断（ケーブル未接続）</b>"
+                                                       if s.get("link") is False else "-")),
+        ("IP の取得方法", ('<b style="color:#c60">固定 IP（DHCP 未取得・フォールバック）</b>' if s.get("fallback")
+                         else ("DHCP" if s.get("mode") == "dhcp" else "-"))
+                        + (" / DHCP 再試行まであと %s" % dur(s["dhcp_retry_in_s"]) if s.get("dhcp_retry_in_s") is not None else "")),
         ("MAC アドレス", esc(s.get("mac"))),
-        ("本機の IP（DHCP）", esc(s.get("ip"))),
+        ("本機の IP", esc(s.get("ip"))),
+        ("サブネットマスク", esc(s.get("netmask"))),
         ("ゲートウェイ / DNS", "%s / %s" % (esc(s.get("gateway")), esc(s.get("dns")))),
     ]
-    rows += [("SSID", esc(s.get("ssid"))),
-             ("電波強度 RSSI", esc(s.get("rssi")) + (" dBm" if s.get("rssi") is not None else ""))]
     rows += [
         ("グローバル IP（getmyip）", esc(s["global_ip"]) + ("（%s前に確認）" % dur(s["getmyip_ago_s"]) if s["getmyip_ago_s"] is not None else "")
                                     + ("　<span style=\"color:red\">失敗: %s</span>" % esc(s["getmyip_error"]) if s["getmyip_error"] else "")),
@@ -413,9 +486,15 @@ def html(s):
             '<button type="submit">OK</button></form>'
             '<p style="font-size:90%">3〜31 文字。英数字と - のみ（先頭・末尾に - は不可）。'
             '変更後は <i>新しい名前</i>.softether.net になります。</p>')
-    return (PAGE_HEAD + '<h1>SoftEther DDNS 状態</h1><table>%s</table>%s'
-            '<p>30 秒ごとに自動更新（入力中は止まります） / <a href="/status.json">status.json</a>'
-            ' / <a href="/init">初期化（DDNS Key の削除）</a></p>'
+    banner = ""
+    if s.get("fallback"):
+        banner = ('<p style="border:2px solid #c60;padding:6px;background:#fff4e5"><b>固定 IP %s で動作中です。</b>'
+                  'DHCP のアドレスを取得できなかった、またはケーブルが未接続でした。'
+                  'ケーブルを接続すると自動で DHCP を再試行し、取得できれば通常動作に切り替わります。</p>'
+                  % esc(s.get("ip") or s.get("fallback_ip")))
+    return (PAGE_HEAD + '<h1>SoftEther DDNS 状態</h1>' + banner + '<table>%s</table>%s'
+            '<p>30 秒ごとに自動更新（入力中は止まります）'
+            ' / <a href="/init">初期化・機器入れ替え（DDNS Key）</a></p>'
             '<script>setInterval(function(){var i=document.getElementById("h");'
             'if(document.activeElement!==i&&!i.value)location.reload();},30000);</script>'
             '</body></html>') % (body, form)
@@ -476,11 +555,17 @@ async def change_hostname_web(name):
     if ddns.hostname and ddns.hostname.lower() == name:
         return True, "すでに %s です。" % esc(ddns.fqdn)
     async with lock:
-        try:
-            err = ddns.change_hostname(name).get("error", 0)
-        except Exception as e:
-            err = -1
-            ddns.last_exc = str(e)
+        for attempt in range(2):
+            try:
+                err = ddns.change_hostname(name).get("error", 0)
+                break
+            except Exception as e:
+                err = -1
+                ddns.last_exc = str(e)
+                if attempt == 0 and d.is_nomem(e):
+                    await nomem_pause("ddns", e)
+                    continue
+                break
         ddns.last_error = err
     if err == 0:
         save_wanted(name)
@@ -498,7 +583,7 @@ async def change_hostname_web(name):
     return False, "%s：%s" % (esc(name), msg)
 
 
-# ---------------- init page (GET /init, POST /reset): delete the DDNS key ----------------
+# ---------------- init page (GET /init; POST /reset, /export, /import): DDNS key ----------------
 def init_info():
     i = net.info() if net else {}
     hn = None
@@ -508,40 +593,55 @@ def init_info():
     except OSError:
         pass
     cur = ddns.hostname if ddns and ddns.hostname else hn
-    return {"mac": i.get("mac"), "ip": i.get("ip"), "hostname": cur, "key_present": _exists(KEY_FILE),
+    return {"mac": i.get("mac"), "ip": i.get("ip"), "mode": i.get("mode"), "hostname": cur, "key_present": _exists(KEY_FILE),
             "boots": st["boot"].get("boots"), "reset_reason": st["boot"].get("last_reason")}
 
 def init_html(m):
     rows = [
         ("MAC アドレス", esc(m["mac"])),
-        ("本機の IP", esc(m["ip"])),
+        ("本機の IP", esc(m["ip"]) + (" （固定 IP）" if m.get("mode") == "static" else " （DHCP）" if m.get("mode") == "dhcp" else "")),
         ("現在のホスト名", (esc(m["hostname"]) + ".softether.net") if m["hostname"]
                           else "不明（まだ登録されていません）"),
         ("DDNS Key (ddns_key.txt)", "あり" if m["key_present"] else "なし（次回起動時に新規作成）"),
         ("起動回数 / 前回の再起動理由", "%s 回目 / %s" % (esc(m["boots"]), esc(m["reset_reason"]))),
     ]
     body = "".join("<tr><th>%s</th><td>%s</td></tr>" % r for r in rows)
-    return (PAGE_HEAD + '<h1>初期化（DDNS Key の削除）</h1>'
-            '<p>本機を別のお客様に渡す・ホスト名を完全に作り直す、といった場合に使います。'
+    return (PAGE_HEAD + '<h1>初期化・機器入れ替え（DDNS Key）</h1>'
+            '<p>機器の入れ替え（Key の書き出し・読み込み）や、<br>ホスト名を完全に作り直す（Key の削除）ときに使います。<br>'
             '通常の運用では使う必要はありません。</p>'
-            '<table>%s</table>'
-            '<p style="color:red"><b>注意:</b> ddns_key.txt を削除すると、今のホスト名（%s）は'
-            '<b>二度と取り戻せません</b>。再起動後に新しい Key と新しいホスト名（vpnNNNNNNNN）が割り当てられます。'
-            '必要なら先に USB で ddns_key.txt をバックアップしてください（mpremote cp :ddns_key.txt .）。</p>'
-            '<form method="post" action="/reset" onsubmit="return confirm(\'DDNS Key とホスト名の設定を削除します。'
-            '元に戻せません。よろしいですか？\')">'
-            '確認のため <b>DELETE</b> と入力: <input name="confirm" autocomplete="off" required> '
-            '<button type="submit" style="color:#fff;background:#c00">Key を削除する</button></form>'
-            '<p><a href="/">状態ページに戻る</a></p></body></html>') % (body, esc(m["hostname"]) if m["hostname"] else "不明")
+            '<table>%s</table>%s'
+            '<p><a href="/">状態ページに戻る</a></p></body></html>') % (
+                body, keyxfer.forms_html(m["key_present"], esc(m["hostname"]) if m["hostname"] else None))
 
-def init_result(ok, msg):
-    return (PAGE_HEAD + '<h1>初期化</h1><p style="color:%s;font-weight:bold">%s</p></body></html>'
-            % ("green" if ok else "red", msg))
+# After a reboot-triggering action: poll /status.json until the boot counter changes
+# (= the device has rebooted and the Web UI is back), then jump to the top page.
+_BACK_JS = ('<p id="rb">再起動を待っています…（応答が戻ったら自動でトップページへ戻ります）</p>'
+            '<p><a href="/">トップページへ戻る</a></p>'
+            '<script>(function(){var old=%s,t0=Date.now(),e=document.getElementById("rb");'
+            'function go(){location.href="/";}'
+            'function poll(){var s=Math.round((Date.now()-t0)/1000);'
+            'if(s>120){e.textContent="自動で戻れませんでした。IP アドレスが変わった可能性があります。下のリンクか、新しい IP で開き直してください。";return;}'
+            'e.textContent="再起動を待っています… "+s+" 秒（応答が戻ったら自動でトップページへ戻ります）";'
+            'var x=new XMLHttpRequest();x.open("GET","/status.json?_="+Date.now());x.timeout=3000;'
+            'x.onload=function(){try{var j=JSON.parse(x.responseText);if(x.status==200&&j.boots!=old){go();return;}}catch(_){}'
+            'setTimeout(poll,2000);};'
+            'x.onerror=x.ontimeout=function(){setTimeout(poll,2000);};x.send();}'
+            'setTimeout(poll,7000);})();</script>')
+
+def init_result(ok, msg, reboot=False):
+    js = ""
+    if reboot:
+        b = st["boot"].get("boots")
+        js = _BACK_JS % (json.dumps(b) if b is not None else "null")
+    return (PAGE_HEAD + '<h1>初期化・機器入れ替え</h1><p style="color:%s;font-weight:bold">%s</p>%s</body></html>'
+            % ("green" if ok else "red", msg, js))
+
+result_html = init_result
 
 def init_reset(form):
-    """POST /reset. Returns (ok, message, reboot)."""
-    if form.get("confirm", "").strip() != "DELETE":
-        return False, '確認の文字列が違います（大文字で DELETE と入力してください）。何も削除していません。<br><a href="/init">戻る</a>', False
+    """POST /reset (confirm=1). Returns (ok, message, reboot)."""
+    if not keyxfer.confirmed(form):
+        return False, keyxfer.CONFIRM_MSG + '<br><a href="/init">戻る</a>', False
     if lock.locked():
         return False, 'DDNS の登録処理中です。少し待ってからやり直してください。何も削除していません。<br><a href="/init">戻る</a>', False
     st["resetting"] = True               # DDNS タスクを止める（削除した Key を作り直さないように）
@@ -556,22 +656,67 @@ def init_reset(form):
     print("init: deleted", done, "errors", errs)
     if errs:
         return False, "削除に失敗しました: %s。5 秒後に再起動します。" % esc(", ".join(errs)), True
-    return True, ("削除しました: %s。5 秒後に再起動し、新しい Key で新しいホスト名を登録します。"
+    return True, ("削除しました: %s。5 秒後に再起動し、新しい Key で新しいホスト名を登録します。<br>"
                   "新しいホスト名は再起動後の状態ページで確認してください。" % (esc(", ".join(done)) or "（削除対象なし）")), True
+
+def init_export(form):
+    """POST /export (confirm=1) -> route tuple: ddns_key.txt download (40 uppercase hex chars)."""
+    if not keyxfer.confirmed(form):
+        return "200 OK", "text/html; charset=utf-8", init_result(False, keyxfer.CONFIRM_MSG + '<br><a href="/init">戻る</a>')
+    k = keyxfer.read_key(KEY_FILE)
+    if not k:
+        return "200 OK", "text/html; charset=utf-8", init_result(False, 'Key（ddns_key.txt）がありません。<br><a href="/init">戻る</a>')
+    print("init: key exported")             # never log the key itself
+    return ("200 OK", "text/plain; charset=us-ascii", k,
+            'Content-Disposition: attachment; filename="ddns_key.txt"\r\nX-Content-Type-Options: nosniff\r\n')
+
+def init_import(body, ctype):
+    """POST /import (multipart file "keyfile", confirm=1). Returns (ok, message, reboot)."""
+    bd = keyxfer.ctype_boundary(ctype)
+    form = keyxfer.parse_multipart(body, bd) if bd else parse_form(body)
+    back = '<br><a href="/init">戻る</a>'
+    if not keyxfer.confirmed(form):
+        return False, keyxfer.CONFIRM_MSG + back, False
+    if lock.locked():
+        return False, "DDNS の登録処理中です。少し待ってからやり直してください。何も変更していません。" + back, False
+    k, err = keyxfer.import_key_from(form)
+    if not k:
+        return False, "読み込めませんでした: %s 何も変更していません。" % err + back, False
+    st["resetting"] = True               # DDNS タスクを止める（古い Key で登録しないように）
+    try:
+        keyxfer.write_key_atomic(KEY_FILE, k)
+    except OSError as e:
+        print("init: key import failed", e)
+        return False, "Key の保存に失敗しました（%s）。5 秒後に再起動します。" % esc(e), True
+    try:
+        os.remove(HOSTNAME_FILE)            # keep the hostname the server has for this key
+    except OSError:
+        pass
+    print("init: key imported, hostname file removed")
+    return True, ("Key を読み込みました。5 秒後に再起動し、この Key に結びついたホスト名で登録を続けます。"
+                  "<br><b>古い機器は電源を切ったままにしてください。</b>"
+                  "再起動後の状態ページでホスト名を確認してください。"), True
 
 async def reboot_later(reason, delay=5):
     await asyncio.sleep(delay)
     hard_reset(reason)
 
 # ---------------- web server ----------------
-async def route(method, path, body):
-    """Returns (code, content-type, body)."""
+async def route(method, path, body, ctype=b""):
+    """Returns (code, content-type, body[, extra headers])."""
     html_t = "text/html; charset=utf-8"
     if method == "POST" and path == "/reset":
         ok, msg, reboot = init_reset(parse_form(body))
         if reboot:
             asyncio.create_task(reboot_later("Web の初期化ページで Key を削除"))
-        return "200 OK", html_t, init_result(ok, msg)
+        return "200 OK", html_t, init_result(ok, msg, reboot)
+    if method == "POST" and path == "/export":
+        return init_export(parse_form(body))
+    if method == "POST" and path == "/import":
+        ok, msg, reboot = init_import(body, ctype)
+        if reboot:
+            asyncio.create_task(reboot_later("Web の初期化ページで Key を読み込み"))
+        return "200 OK", html_t, init_result(ok, msg, reboot)
     if method == "GET" and path == "/init":
         return "200 OK", html_t, init_html(init_info())
     if method == "POST" and path == "/hostname":
@@ -583,31 +728,59 @@ async def route(method, path, body):
         return "200 OK", html_t, html(status())
     return "404 Not Found", "text/plain; charset=utf-8", "not found"
 
+_WEB_QUIET_ERRNO = (104, 107, 32, 103, 110, 113)   # ECONNRESET ENOTCONN EPIPE ECONNABORTED ETIMEDOUT EHOSTUNREACH
+WEB_READ_TIMEOUT = 10     # s: a client that connects and sends nothing must not hold a socket forever
+
 async def handle(reader, writer):
     try:
-        line = await reader.readline()
+        line = await asyncio.wait_for(reader.readline(), WEB_READ_TIMEOUT)
         clen = 0
+        ctype = b""
         for _ in range(50):
-            h = await reader.readline()
+            h = await asyncio.wait_for(reader.readline(), WEB_READ_TIMEOUT)
             if not h or h == b"\r\n":
                 break
-            if h.lower().startswith(b"content-length:"):
+            hl = h.lower()
+            if hl.startswith(b"content-length:"):
                 try:
                     clen = int(h.split(b":", 1)[1].strip().decode())
                 except ValueError:
                     clen = 0
+            elif hl.startswith(b"content-type:"):
+                ctype = h.split(b":", 1)[1].strip()
         parts = line.split()
         method = parts[0].decode() if parts else "GET"
         path = parts[1].decode().split("?")[0] if len(parts) > 1 else "/"
-        body = await reader.readexactly(clen) if method == "POST" and 0 < clen <= 512 else b""
-        code, ctype, body = await route(method, path, body)
+        body = b""
+        if method == "POST" and clen > keyxfer.MAX_BODY:
+            left = min(clen, 16384)              # drain a little so the browser sees the reply
+            while left > 0:
+                c = await asyncio.wait_for(reader.read(min(512, left)), WEB_READ_TIMEOUT)
+                if not c:
+                    break
+                left -= len(c)
+            r = ("413 Payload Too Large", "text/html; charset=utf-8",
+                 result_html(False, "送信データが大きすぎます（最大 %d バイト）。ddns_key.txt を選んでください。"
+                             % keyxfer.MAX_BODY))
+        else:
+            if method == "POST" and clen > 0:
+                body = await asyncio.wait_for(reader.readexactly(clen), WEB_READ_TIMEOUT)
+            r = await route(method, path, body, ctype)
+        code, rtype, body = r[0], r[1], r[2]
+        extra = r[3] if len(r) > 3 else ""
         b = body.encode()
-        writer.write(("HTTP/1.0 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
-                      "Cache-Control: no-cache\r\nConnection: close\r\n\r\n" % (code, ctype, len(b))).encode())
+        writer.write(("HTTP/1.0 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n%s"
+                      "Cache-Control: no-store\r\nConnection: close\r\n\r\n" % (code, rtype, len(b), extra)).encode())
         writer.write(b)
         await writer.drain()
+    except asyncio.TimeoutError:
+        pass                                 # 何も送ってこない接続（ブラウザの先行接続など）
     except Exception as e:
-        print("web: error", e)
+        code = getattr(e, "errno", None)
+        if code is None and isinstance(e, OSError) and e.args and isinstance(e.args[0], int):
+            code = e.args[0]
+        if not (isinstance(e, OSError) and code in _WEB_QUIET_ERRNO):   # 相手が切っただけなら黙る
+            print("web: error %s: %s" % (type(e).__name__, str(e) or repr(e)))
     finally:
         try:
             writer.close()
@@ -649,19 +822,15 @@ async def main_async():
     global net
     asyncio.create_task(wdt_task())
     asyncio.create_task(led_task())
-    try:
-        from secrets import WIFI_SSID, WIFI_PASSWORD
-    except ImportError:
-        WIFI_SSID = WIFI_PASSWORD = None
-        print("wifi: secrets.py not found (copy secrets_example.py to secrets.py)")
-    net = netif.Net(WIFI_SSID, WIFI_PASSWORD, WIFI_TIMEOUT)
-    dnsfix.dns_server_hook = net.dns         # DNS from DHCP
-    d.MAC_HOOK = net.mac                     # machine hash for new_key(): Wi-Fi MAC
+    net = netif.Net(LAN_PINS, LAN_DHCP_TIMEOUT, LAN_FALLBACK_IP, LAN_LINK_WAIT, LAN_DHCP_RETRY,
+                    NET_HOSTNAME)            # no secrets needed (wired LAN)
+    dnsfix.dns_server_hook = net.dns         # DNS of the LAN (DHCP lease or fallback setting)
+    d.MAC_HOOK = net.mac                     # machine hash for new_key(): W5100S MAC
     feed()
     r = await net.start()
     print("net: start ->", r)
     server = await asyncio.start_server(handle, "0.0.0.0", WEB_PORT)
-    print("web: listening on port", WEB_PORT)
+    print("web: listening on port", WEB_PORT, "(%s)" % (r or "no network"))
     await guarded("ddns", ddns_task)
     server.close()
 

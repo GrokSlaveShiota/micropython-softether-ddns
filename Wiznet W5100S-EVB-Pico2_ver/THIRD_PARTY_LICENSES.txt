@@ -1,13 +1,15 @@
 THIRD_PARTY_LICENSES.txt
 ========================
-この製品（SoftEther DDNS クライアント for Raspberry Pi Pico 2 W）に含まれる、または書き込んで使うソフトウェアのライセンス表示です。
+この製品（SoftEther DDNS クライアント for WIZnet W5100S-EVB-Pico2）に含まれる、または書き込んで使うソフトウェアのライセンス表示です。
 製品と一緒に（印刷物・PDF・本ファイルのいずれかで）お客様に渡してください。
 
-ファームウェア: MicroPython 公式 RPI_PICO2_W v1.29.x（micropython.org から入手。本パッケージには同梱していません）。
+ファームウェア: WIZnet 版 MicroPython LWIP-W5100S_EVB_PICO2-v1.29.0-preview.uf2
+（https://github.com/WIZnet-ioNIC/WIZnet-EVB-Pico-micropython のリリース v1.29.0-WIZnet-timeout から入手。
+本パッケージには同梱していません）。
 このファームウェアには MicroPython 本体のほか、pico-sdk、TinyUSB、lwIP、mbedTLS、
-cyw43-driver（Wi-Fi）、BTstack（Bluetooth。本製品では未使用だがファームウェアに含まれる）が入っています。
+WIZnet ioLibrary_Driver（W5100S 用ドライバ）が入っています。
 
-本パッケージの Python ファイル（main.py, netif.py, ddns_softether.py, dnsfix.py, config.py）
+本パッケージの Python ファイル（main.py, netif.py, ddns_softether.py, dnsfix.py, keyxfer.py, config.py）
 は SoftEther VPN のプロトコルを読み解いて新たに書いたもので、SoftEther のコードはコピーして
 いません。ただし定数（URL、証明書ハッシュ DDNS_CERT_HASH など）は SoftEther VPN
 （Apache License 2.0）のソースに由来します。
@@ -20,9 +22,8 @@ cyw43-driver（Wi-Fi）、BTstack（Bluetooth。本製品では未使用だが�
   4. TinyUSB ................................. MIT
   5. lwIP .................................... BSD-3-Clause
   6. Mbed TLS ................................ Apache-2.0（Apache-2.0 / GPL-2.0-or-later のデュアル。Apache-2.0 を選択）
-  7. cyw43-driver（Wi-Fi） ................... Raspberry Pi 製チップ専用ライセンス（LICENSE.RP）
-  8. BTstack ................................. Raspberry Pi 製品向けライセンス（pico-sdk の LICENSE.RP）
-  9. SoftEther VPN（定数の出典） .............. Apache-2.0
+  7. WIZnet ioLibrary_Driver ................ MIT
+  8. SoftEther VPN（定数の出典） .............. Apache-2.0
 
 
 ==============================================================================
@@ -161,76 +162,31 @@ IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 OF SUCH DAMAGE.
 
 ==============================================================================
-cyw43-driver
-https://github.com/georgerobotics/cyw43-driver
-（Raspberry Pi 製チップ上での利用に対する LICENSE.RP が適用されます）
+WIZnet ioLibrary_Driver
+https://github.com/Wiznet/ioLibrary_Driver
+（ファームウェアの lib/wiznet6k として組み込まれています）
 
-Copyright (C) 2019-2022 George Robotics Pty Ltd
+Copyright (c) 2014 WIZnet Co.,Ltd.
+Copyright (c) WIZnet ioLibrary Project.
+All rights reserved.
 
-Raspberry Pi Ltd (Licensor) hereby grants to you a non-exclusive license to
-use this software solely with the Licensor's microcontroller chip (RP2040) or
-any other semiconductor device produced by the Licensor. No other use is
-permitted under the terms of this licence.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-1. The software can only be used and redistributed in conjunction with RP2040
-   or any other semiconductor device produced by the Licensor.
-2. Redistributions of source code must retain the above copyright notice,
-   this list of conditions and the following disclaimer.
-3. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
-
-THIS SOFTWARE IS PROVIDED BY THE LICENSOR AND COPYRIGHT OWNER "AS IS" AND ANY
-EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE LICENSOR OR COPYRIGHT OWNER BE LIABLE FOR
-ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-This software is also available from the copyright owner under different
-terms (see ./LICENSE)
-
-==============================================================================
-BTstack
-https://github.com/bluekitchen/btstack
-（Raspberry Pi 製品 Pico W / Pico 2 W 等で使う場合の pico-sdk 同梱ライセンス）
-
-“BlueKitchen” shall refer to BlueKitchen GmbH.
-“Raspberry Pi” shall refer to Raspberry Pi Ltd.
-“Product” shall refer to Raspberry Pi hardware products Pico W, Pico WH, Pico 2 W, Pico 2 WH, and RM2.
-“Customer” means any purchaser of a Product.
-“Customer Products” means products manufactured or distributed by Customers which use or are derived from Products.
-
-Raspberry Pi grants to the Customer a non-exclusive, non-transferable, non-sublicensable, irrevocable, perpetual
-and worldwide licence to use, copy, store, develop, modify, and transmit BTstack in order to use BTstack with or
-integrate BTstack into Products or Customer Products, and distribute BTstack as part of these Products or
-Customer Products or their related documentation or SDKs.
-
-All use of BTstack by the Customer is limited to Products or Customer Products, and the Customer represents and
-warrants that all such use shall be in compliance with the terms of this licence and all applicable laws and
-regulations, including but not limited to, copyright and other intellectual property laws and privacy regulations.
-
-BlueKitchen retains all rights, title and interest in, to and associated with BTstack and associated websites.
-Customer shall not take any action inconsistent with BlueKitchen’s ownership of BTstack, any associated services,
-websites and related content.
-
-There are no implied licences under the terms set forth in this licence, and any rights not expressly granted
-hereunder are reserved by BlueKitchen.
-
-BTSTACK IS PROVIDED BY RASPBERRY PI "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
-THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED TO THE FULLEST EXTENT
-PERMISSIBLE UNDER APPLICABLE LAW. IN NO EVENT SHALL RASPBERRY PI OR BLUEKITCHEN BE LIABLE FOR ANY DIRECT, INDIRECT,
-INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
-GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
-OUT OF THE USE OF BTSTACK, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ==============================================================================
 Mbed TLS（Apache-2.0 を選択）
